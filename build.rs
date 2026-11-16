@@ -69,7 +69,6 @@ fn build_ortho_ico() -> Vec<u8> {
 
 // Computes the BGRA color for pixel `(x, y)` (top-down coordinates `0..32`).
 const fn pixel_bgra(x: u32, y: u32) -> [u8; 4] {
-    // Transparent outer margin + rounded corners
     if x < 2 || x > 29 || y < 2 || y > 29 {
         return [0, 0, 0, 0];
     }
@@ -77,26 +76,24 @@ const fn pixel_bgra(x: u32, y: u32) -> [u8; 4] {
         return [0, 0, 0, 0];
     }
 
-    // Left Half tile pane (bright cyan-blue #38BDF8 -> BGRA [248, 189, 56, 255])
-    if x >= 5 && x <= 14 && y >= 5 && y <= 26 {
-        return [248, 189, 56, 255];
-    }
-
-    // Top-Right Quarter tile pane (soft indigo #818CF8 -> BGRA [248, 140, 129, 255])
-    if x >= 17 && x <= 26 && y >= 5 && y <= 14 {
-        return [248, 140, 129, 255];
-    }
-
-    // Bottom-Right Quarter tile pane (emerald-teal #2DD4BF -> BGRA [191, 212, 45, 255])
-    if x >= 17 && x <= 26 && y >= 17 && y <= 26 {
-        return [191, 212, 45, 255];
-    }
-
-    // Subtle 1px outer border (#3F3F46 -> BGRA [70, 63, 63, 255])
     if x == 2 || x == 29 || y == 2 || y == 29 {
-        return [70, 63, 63, 255];
+        let v = (220_u32.saturating_sub(y * 6)) as u8;
+        return [v, v, v, 255];
     }
 
-    // Dark zinc desktop background (#18181B -> BGRA [27, 24, 24, 255])
-    [27, 24, 24, 255]
+    let in_frame = x >= 6 && x <= 25 && y >= 6 && y <= 25;
+    let on_frame_edge = x == 6 || x == 25 || y == 6 || y == 25 || x == 15 || (x > 15 && y == 15);
+    if in_frame && on_frame_edge {
+        return [235, 235, 240, 255];
+    }
+
+    let left_pane = x >= 8 && x <= 13 && y >= 8 && y <= 23;
+    let tr_pane = x >= 17 && x <= 23 && y >= 8 && y <= 13;
+    let br_pane = x >= 17 && x <= 23 && y >= 17 && y <= 23;
+    if left_pane || tr_pane || br_pane {
+        let shade = (250 - (y * 2) - (x % 3) * 4) as u8;
+        return [shade, shade, shade, 255];
+    }
+
+    [14, 12, 12, 255]
 }

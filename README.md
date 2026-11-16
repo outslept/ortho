@@ -1,6 +1,12 @@
+<div align="center">
+
+<img src="icon.svg" width="96" alt="ortho"/>
+
 # ortho
 
 fast rectangle-style window manager for windows. zero animations, dwm border compensation, mixed-dpi aware, single binary.
+
+</div>
 
 ## hotkeys
 
