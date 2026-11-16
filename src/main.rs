@@ -1,5 +1,7 @@
 //! Ortho (`orthowm`) — Fast, native Rectangle-style window tiler for Windows.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 pub mod config;
 pub mod hotkey;
 pub mod tile;
@@ -18,7 +20,7 @@ use crate::hotkey::{Command, HotkeyRegistry};
 use crate::tray::{Tray, TrayEvent, WM_APP_TRAY_CMD};
 use crate::win::RestoreHistory;
 
-/// Guard that holds the single-instance OS mutex for the lifetime of the process.
+// Guard that holds the single-instance OS mutex for the lifetime of the process.
 struct SingleInstance(HANDLE);
 
 impl Drop for SingleInstance {
@@ -29,8 +31,8 @@ impl Drop for SingleInstance {
     }
 }
 
-/// Acquires a session-local named mutex so launching `orthowm` twice exits cleanly
-/// instead of competing for global hotkeys.
+// Acquires a session-local named mutex so launching `orthowm` twice exits cleanly
+// instead of competing for global hotkeys.
 fn acquire_single_instance() -> Option<SingleInstance> {
     let handle = unsafe { CreateMutexW(None, false, w!("Local\\OrthoWindowManagerMutex")) }.ok()?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -94,7 +96,7 @@ fn main() {
     }
 }
 
-/// Executes a tiling, restore, or monitor-hop command on the focused (or `fallback`) window.
+// Executes a tiling, restore, or monitor-hop command on the focused (or `fallback`) window.
 fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory, fallback: Option<HWND>) {
     let _ = match cmd {
         Command::Tile(action) => win::apply_foreground(action, gap, history, fallback),
