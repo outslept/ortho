@@ -1,20 +1,24 @@
+//! Ortho (`orthowm`) — Fast, native Rectangle-style window tiler for Windows.
+
 pub mod config;
 pub mod hotkey;
 pub mod tile;
+pub mod tray;
 pub mod win;
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, TranslateMessage, WM_HOTKEY,
+    DispatchMessageW, GetMessageW, MSG, PostQuitMessage, TranslateMessage, WM_HOTKEY,
 };
 use windows::core::w;
 
 use crate::config::ConfigManager;
 use crate::hotkey::{Command, HotkeyRegistry};
+use crate::tray::{Tray, TrayEvent, WM_APP_TRAY_CMD};
 use crate::win::RestoreHistory;
 
-// Guard that holds the single-instance OS mutex for the lifetime of the process.
+/// Guard that holds the single-instance OS mutex for the lifetime of the process.
 struct SingleInstance(HANDLE);
 
 impl Drop for SingleInstance {
@@ -25,8 +29,8 @@ impl Drop for SingleInstance {
     }
 }
 
-// Acquires a session-local named mutex so launching `orthowm` twice exits cleanly
-// instead of competing for global hotkeys.
+/// Acquires a session-local named mutex so launching `orthowm` twice exits cleanly
+/// instead of competing for global hotkeys.
 fn acquire_single_instance() -> Option<SingleInstance> {
     let handle = unsafe { CreateMutexW(None, false, w!("Local\\OrthoWindowManagerMutex")) }.ok()?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -46,6 +50,7 @@ fn main() {
     let mut config_mgr = ConfigManager::load();
     let mut hotkeys = HotkeyRegistry::register(&config_mgr.config().hotkeys);
     let mut history = RestoreHistory::new();
+    let _tray = Tray::new();
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&raw mut msg, None, 0, 0) }.0 > 0 {
@@ -58,7 +63,29 @@ fn main() {
             let hotkey_id = msg.wParam.0 as i32;
 
             if let Some(cmd) = hotkeys.command_for_id(hotkey_id) {
-                dispatch_command(cmd, config_mgr.config().gap, &mut history);
+                dispatch_command(cmd, config_mgr.config().gap, &mut history, None);
+            }
+        } else if msg.message == WM_APP_TRAY_CMD {
+            if config_mgr.reload_if_changed() {
+                hotkeys.rebind(&config_mgr.config().hotkeys);
+            }
+
+            if let Some(event) = Tray::decode_event(msg.wParam.0) {
+                match event {
+                    TrayEvent::Window(cmd) => {
+                        let target = Tray::last_active_window();
+                        dispatch_command(cmd, config_mgr.config().gap, &mut history, target);
+                    }
+                    TrayEvent::OpenConfig => {
+                        tray::open_config_in_editor(config_mgr.path());
+                    }
+                    TrayEvent::ToggleStartup => {
+                        tray::toggle_startup();
+                    }
+                    TrayEvent::Quit => {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                }
             }
         }
 
@@ -67,12 +94,12 @@ fn main() {
     }
 }
 
-// Executes a tiling, restore, or monitor-hop command on the focused window.
-fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory) {
+/// Executes a tiling, restore, or monitor-hop command on the focused (or `fallback`) window.
+fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory, fallback: Option<HWND>) {
     let _ = match cmd {
-        Command::Tile(action) => win::apply_foreground(action, gap, history),
-        Command::Restore => win::restore_foreground(history),
-        Command::PrevMonitor => win::move_foreground_monitor(-1),
-        Command::NextMonitor => win::move_foreground_monitor(1),
+        Command::Tile(action) => win::apply_foreground(action, gap, history, fallback),
+        Command::Restore => win::restore_foreground(history, fallback),
+        Command::PrevMonitor => win::move_foreground_monitor(-1, fallback),
+        Command::NextMonitor => win::move_foreground_monitor(1, fallback),
     };
 }

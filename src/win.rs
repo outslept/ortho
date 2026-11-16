@@ -1,3 +1,5 @@
+//! Win32 window manipulation, DWM border compensation, multi-monitor geometry, and DPI scaling.
+
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -20,8 +22,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowPos, ShowWindow, WS_CAPTION,
-    WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
+    WS_CAPTION, WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::BOOL;
 
@@ -117,7 +119,36 @@ pub fn init_dpi() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
-// Applies a tiling `action` to the currently focused window using `logical_gap`
+// Returns `true` if `hwnd` is currently a valid, user-resizable top-level application window.
+#[must_use]
+pub fn is_manageable_hwnd(hwnd: HWND) -> bool {
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let Ok((_, full_area)) = monitor_rects(monitor) else {
+        return false;
+    };
+    is_manageable(hwnd, full_area)
+}
+
+// Resolves the active target window: uses `GetForegroundWindow()` if manageable,
+// or falls back to `fallback` (the last focused user window before opening the tray menu).
+fn resolve_target_hwnd(fallback: Option<HWND>) -> Option<HWND> {
+    let fg = unsafe { GetForegroundWindow() };
+    if is_manageable_hwnd(fg) {
+        return Some(fg);
+    }
+    let fb = fallback?;
+    if is_manageable_hwnd(fb) {
+        let _ = unsafe { SetForegroundWindow(fb) };
+        Some(fb)
+    } else {
+        None
+    }
+}
+
+// Applies a tiling `action` to the focused (or `fallback`) window using `logical_gap`
 // (in 96-DPI pixels, scaled automatically to the target monitor's physical DPI).
 //
 // If the window is currently in a floating (non-maximized, non-snapped) state,
@@ -126,18 +157,14 @@ pub fn apply_foreground(
     action: Action,
     logical_gap: i32,
     history: &mut RestoreHistory,
+    fallback: Option<HWND>,
 ) -> Result<bool, WinError> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() {
+    let Some(hwnd) = resolve_target_hwnd(fallback) else {
         return Ok(false);
-    }
+    };
 
     let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let (work_area, full_area) = monitor_rects(monitor)?;
-
-    if !is_manageable(hwnd, full_area) {
-        return Ok(false);
-    }
+    let (work_area, _) = monitor_rects(monitor)?;
 
     let was_zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
     if was_zoomed {
@@ -162,22 +189,20 @@ pub fn apply_foreground(
     Ok(true)
 }
 
-// Restores the currently focused window to its saved pre-tiled floating bounds in `history`.
+// Restores the focused (or `fallback`) window to its saved pre-tiled floating bounds in `history`.
 //
 // If no saved bounds exist for the window but it is currently maximized via Windows,
 // unmaximizes it in 0ms.
-pub fn restore_foreground(history: &mut RestoreHistory) -> Result<bool, WinError> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() {
+pub fn restore_foreground(
+    history: &mut RestoreHistory,
+    fallback: Option<HWND>,
+) -> Result<bool, WinError> {
+    let Some(hwnd) = resolve_target_hwnd(fallback) else {
         return Ok(false);
-    }
+    };
 
     let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let (work_area, full_area) = monitor_rects(monitor)?;
-
-    if !is_manageable(hwnd, full_area) {
-        return Ok(false);
-    }
+    let (work_area, _) = monitor_rects(monitor)?;
 
     let was_zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
 
@@ -198,17 +223,16 @@ pub fn restore_foreground(history: &mut RestoreHistory) -> Result<bool, WinError
     Ok(false)
 }
 
-// Moves the currently focused window to an adjacent monitor in spatial order
+// Moves the focused (or `fallback`) window to an adjacent monitor in spatial order
 // (`step = -1` for previous monitor, `step = 1` for next monitor).
 //
 // Preserves the window's relative position and size proportionally to the destination
 // monitor's work area, and uses a two-pass `SetWindowPos` when crossing monitors with
 // different DPIs so Windows recalculates DWM frame borders before final placement.
-pub fn move_foreground_monitor(step: isize) -> Result<bool, WinError> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() {
+pub fn move_foreground_monitor(step: isize, fallback: Option<HWND>) -> Result<bool, WinError> {
+    let Some(hwnd) = resolve_target_hwnd(fallback) else {
         return Ok(false);
-    }
+    };
 
     let monitors = enumerate_monitors();
     if monitors.len() <= 1 {
@@ -216,11 +240,7 @@ pub fn move_foreground_monitor(step: isize) -> Result<bool, WinError> {
     }
 
     let src_mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let (src_work, src_full) = monitor_rects(src_mon)?;
-
-    if !is_manageable(hwnd, src_full) {
-        return Ok(false);
-    }
+    let (src_work, _) = monitor_rects(src_mon)?;
 
     let Some(src_idx) = monitors.iter().position(|&(m, _)| m == src_mon) else {
         return Ok(false);
@@ -506,7 +526,7 @@ mod tests {
         let r2 = Rect { x: 200, y: 220, width: 900, height: 700 };
 
         hist.record(42, r1);
-        hist.record(42, r2);
+        hist.record(42, r2); // In-place update for same HWND key
 
         assert_eq!(hist.take(42), Some(r2));
         assert_eq!(hist.take(42), None);
@@ -521,6 +541,7 @@ mod tests {
             hist.record(i, r);
         }
 
+        // Key 1 was overwritten by key 17 in the 16-slot ring buffer
         assert_eq!(hist.take(1), None);
         assert_eq!(hist.take(2), Some(Rect { x: 2, y: 0, width: 500, height: 400 }));
         assert_eq!(hist.take(17), Some(Rect { x: 17, y: 0, width: 500, height: 400 }));
