@@ -27,16 +27,16 @@ use windows::core::BOOL;
 
 use crate::tile::{self, Action, Rect};
 
-/// Standard 100% scaling baseline DPI on Windows.
+// Standard 100% scaling baseline DPI on Windows.
 const DEFAULT_DPI: u32 = 96;
 
-/// Number of windows tracked in the stack-allocated restore ring buffer.
+// Number of windows tracked in the stack-allocated restore ring buffer.
 const HISTORY_CAP: usize = 16;
 
-/// Empty sentinel rect used for unoccupied slots in [`RestoreHistory`].
+// Empty sentinel rect used for unoccupied slots in [`RestoreHistory`].
 const EMPTY_RECT: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
 
-/// Fixed-capacity ring buffer storing pre-tiled floating window positions.
+// Fixed-capacity ring buffer storing pre-tiled floating window positions.
 #[derive(Debug, Clone, Copy)]
 pub struct RestoreHistory {
     entries: [(isize, Rect); HISTORY_CAP],
@@ -50,16 +50,16 @@ impl Default for RestoreHistory {
 }
 
 impl RestoreHistory {
-    /// Creates an empty 16-slot restore history buffer on the stack.
+    // Creates an empty 16-slot restore history buffer on the stack.
     #[must_use]
     pub const fn new() -> Self {
         Self { entries: [(0, EMPTY_RECT); HISTORY_CAP], cursor: 0 }
     }
 
-    /// Records the floating `rect` for window `key` (`HWND` cast to `isize`).
-    ///
-    /// Updates the existing entry in-place if `key` is already tracked; otherwise
-    /// writes into the oldest slot in the ring buffer.
+    // Records the floating `rect` for window `key` (`HWND` cast to `isize`).
+    //
+    // Updates the existing entry in-place if `key` is already tracked; otherwise
+    // writes into the oldest slot in the ring buffer.
     pub fn record(&mut self, key: isize, rect: Rect) {
         if key == 0 {
             return;
@@ -74,7 +74,7 @@ impl RestoreHistory {
         self.cursor = (self.cursor + 1) % HISTORY_CAP;
     }
 
-    /// Removes and returns the saved floating `Rect` for window `key`, if present.
+    // Removes and returns the saved floating `Rect` for window `key`, if present.
     pub fn take(&mut self, key: isize) -> Option<Rect> {
         if key == 0 {
             return None;
@@ -86,14 +86,14 @@ impl RestoreHistory {
     }
 }
 
-/// Errors returned by Win32 window queries and geometry operations.
+// Errors returned by Win32 window queries and geometry operations.
 #[derive(Debug)]
 pub enum WinError {
-    /// Failed to query monitor bounds via `GetMonitorInfoW`.
+    // Failed to query monitor bounds via `GetMonitorInfoW`.
     MonitorInfo,
-    /// Failed to read raw window coordinates via `GetWindowRect`.
+    // Failed to read raw window coordinates via `GetWindowRect`.
     WindowRect(windows::core::Error),
-    /// Failed to reposition the window via `SetWindowPos`.
+    // Failed to reposition the window via `SetWindowPos`.
     SetPos(windows::core::Error),
 }
 
@@ -109,19 +109,19 @@ impl std::fmt::Display for WinError {
 
 impl std::error::Error for WinError {}
 
-/// Enables Per-Monitor V2 DPI awareness for the current process.
-///
-/// Must be called once at startup before any Win32 window or monitor queries so
-/// all coordinates are reported in physical pixels across mixed-DPI displays.
+// Enables Per-Monitor V2 DPI awareness for the current process.
+//
+// Must be called once at startup before any Win32 window or monitor queries so
+// all coordinates are reported in physical pixels across mixed-DPI displays.
 pub fn init_dpi() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
-/// Applies a tiling `action` to the currently focused window using `logical_gap`
-/// (in 96-DPI pixels, scaled automatically to the target monitor's physical DPI).
-///
-/// If the window is currently in a floating (non-maximized, non-snapped) state,
-/// its bounds are recorded in `history` before tiling.
+// Applies a tiling `action` to the currently focused window using `logical_gap`
+// (in 96-DPI pixels, scaled automatically to the target monitor's physical DPI).
+//
+// If the window is currently in a floating (non-maximized, non-snapped) state,
+// its bounds are recorded in `history` before tiling.
 pub fn apply_foreground(
     action: Action,
     logical_gap: i32,
@@ -162,10 +162,10 @@ pub fn apply_foreground(
     Ok(true)
 }
 
-/// Restores the currently focused window to its saved pre-tiled floating bounds in `history`.
-///
-/// If no saved bounds exist for the window but it is currently maximized via Windows,
-/// unmaximizes it in 0ms.
+// Restores the currently focused window to its saved pre-tiled floating bounds in `history`.
+//
+// If no saved bounds exist for the window but it is currently maximized via Windows,
+// unmaximizes it in 0ms.
 pub fn restore_foreground(history: &mut RestoreHistory) -> Result<bool, WinError> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
@@ -198,12 +198,12 @@ pub fn restore_foreground(history: &mut RestoreHistory) -> Result<bool, WinError
     Ok(false)
 }
 
-/// Moves the currently focused window to an adjacent monitor in spatial order
-/// (`step = -1` for previous monitor, `step = 1` for next monitor).
-///
-/// Preserves the window's relative position and size proportionally to the destination
-/// monitor's work area, and uses a two-pass `SetWindowPos` when crossing monitors with
-/// different DPIs so Windows recalculates DWM frame borders before final placement.
+// Moves the currently focused window to an adjacent monitor in spatial order
+// (`step = -1` for previous monitor, `step = 1` for next monitor).
+//
+// Preserves the window's relative position and size proportionally to the destination
+// monitor's work area, and uses a two-pass `SetWindowPos` when crossing monitors with
+// different DPIs so Windows recalculates DWM frame borders before final placement.
 pub fn move_foreground_monitor(step: isize) -> Result<bool, WinError> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
@@ -250,7 +250,7 @@ pub fn move_foreground_monitor(step: isize) -> Result<bool, WinError> {
     Ok(true)
 }
 
-/// Clamps `rect` so that its dimensions and coordinates fit inside `work`.
+// Clamps `rect` so that its dimensions and coordinates fit inside `work`.
 fn clamp_to_work_area(rect: Rect, work: Rect) -> Rect {
     let width = rect.width.clamp(1, work.width.max(1));
     let height = rect.height.clamp(1, work.height.max(1));
@@ -259,7 +259,7 @@ fn clamp_to_work_area(rect: Rect, work: Rect) -> Rect {
     Rect { x, y, width, height }
 }
 
-/// Maps a window rectangle `rect` proportionally from `src` work area to `dst` work area.
+// Maps a window rectangle `rect` proportionally from `src` work area to `dst` work area.
 fn map_rect_between_screens(rect: Rect, src: Rect, dst: Rect) -> Rect {
     let src_w = i64::from(src.width.max(1));
     let src_h = i64::from(src.height.max(1));
@@ -283,7 +283,7 @@ fn map_rect_between_screens(rect: Rect, src: Rect, dst: Rect) -> Rect {
     }
 }
 
-/// Enumerates all connected display monitors sorted spatially from left to right, top to bottom.
+// Enumerates all connected display monitors sorted spatially from left to right, top to bottom.
 fn enumerate_monitors() -> Vec<(HMONITOR, Rect)> {
     let mut list: Vec<(HMONITOR, Rect)> = Vec::with_capacity(4);
     let lparam = LPARAM((&raw mut list) as isize);
@@ -292,7 +292,7 @@ fn enumerate_monitors() -> Vec<(HMONITOR, Rect)> {
     list
 }
 
-/// Win32 callback invoked by `EnumDisplayMonitors` for each active display.
+// Win32 callback invoked by `EnumDisplayMonitors` for each active display.
 unsafe extern "system" fn enum_monitors_proc(
     hmonitor: HMONITOR,
     _hdc: HDC,
@@ -308,7 +308,7 @@ unsafe extern "system" fn enum_monitors_proc(
     BOOL(1)
 }
 
-/// Returns the effective DPI of `monitor`, falling back to 96 DPI on failure.
+// Returns the effective DPI of `monitor`, falling back to 96 DPI on failure.
 fn monitor_dpi(monitor: HMONITOR) -> u32 {
     let mut dpi_x: u32 = DEFAULT_DPI;
     let mut dpi_y: u32 = DEFAULT_DPI;
@@ -322,13 +322,13 @@ fn monitor_dpi(monitor: HMONITOR) -> u32 {
     }
 }
 
-/// Scales `logical_gap` from 96-DPI logical pixels to the physical pixels of `monitor`.
+// Scales `logical_gap` from 96-DPI logical pixels to the physical pixels of `monitor`.
 fn scale_gap(monitor: HMONITOR, logical_gap: i32) -> i32 {
     let dpi = monitor_dpi(monitor).cast_signed();
     (logical_gap.max(0) * dpi + 48) / 96
 }
 
-/// Returns `true` if `hwnd` is a standard user-resizable top-level application window.
+// Returns `true` if `hwnd` is a standard user-resizable top-level application window.
 fn is_manageable(hwnd: HWND, full_monitor: Rect) -> bool {
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool()
         || !unsafe { IsWindowVisible(hwnd) }.as_bool()
@@ -361,7 +361,7 @@ fn is_manageable(hwnd: HWND, full_monitor: Rect) -> bool {
     true
 }
 
-/// Unmaximizes `hwnd` while suppressing the 200ms DWM restore animation for 0ms response.
+// Unmaximizes `hwnd` while suppressing the 200ms DWM restore animation for 0ms response.
 fn restore_without_animation(hwnd: HWND) {
     let disable = BOOL(1);
     let enable = BOOL(0);
@@ -387,8 +387,8 @@ fn restore_without_animation(hwnd: HWND) {
     };
 }
 
-/// Queries the monitor's `(work_area, full_area)` in physical pixels, reserving a 1px margin
-/// on any edge that hosts an auto-hide taskbar when `work_area` equals `full_area`.
+// Queries the monitor's `(work_area, full_area)` in physical pixels, reserving a 1px margin
+// on any edge that hosts an auto-hide taskbar when `work_area` equals `full_area`.
 fn monitor_rects(monitor: HMONITOR) -> Result<(Rect, Rect), WinError> {
     #[expect(clippy::cast_possible_truncation)]
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -407,7 +407,7 @@ fn monitor_rects(monitor: HMONITOR) -> Result<(Rect, Rect), WinError> {
     Ok((work, full))
 }
 
-/// Shrinks `work` by 1px on edges where an auto-hide taskbar is registered on `monitor_rect`.
+// Shrinks `work` by 1px on edges where an auto-hide taskbar is registered on `monitor_rect`.
 fn adjust_for_autohide(mut work: Rect, monitor_rect: RECT) -> Rect {
     let has_autohide = |edge: u32| -> bool {
         #[expect(clippy::cast_possible_truncation)]
@@ -437,12 +437,12 @@ fn adjust_for_autohide(mut work: Rect, monitor_rect: RECT) -> Rect {
     work
 }
 
-/// Returns the visible DWM frame bounds of `hwnd`, falling back to `GetWindowRect`.
+// Returns the visible DWM frame bounds of `hwnd`, falling back to `GetWindowRect`.
 fn visible_rect(hwnd: HWND) -> Result<Rect, WinError> {
     if let Some(dwm) = dwm_frame_rect(hwnd) { Ok(dwm) } else { raw_window_rect(hwnd) }
 }
 
-/// Repositions `hwnd` so that its *visible* DWM frame matches `target` on screen.
+// Repositions `hwnd` so that its *visible* DWM frame matches `target` on screen.
 fn set_visible_rect(hwnd: HWND, target: Rect, async_pos: bool) -> Result<(), WinError> {
     let raw = raw_window_rect(hwnd)?;
     let vis = dwm_frame_rect(hwnd).unwrap_or(raw);
@@ -466,14 +466,14 @@ fn set_visible_rect(hwnd: HWND, target: Rect, async_pos: bool) -> Result<(), Win
     unsafe { SetWindowPos(hwnd, None, x, y, width, height, flags) }.map_err(WinError::SetPos)
 }
 
-/// Queries `GetWindowRect` (which includes invisible DWM resize borders).
+// Queries `GetWindowRect` (which includes invisible DWM resize borders).
 fn raw_window_rect(hwnd: HWND) -> Result<Rect, WinError> {
     let mut r = RECT::default();
     unsafe { GetWindowRect(hwnd, &raw mut r) }.map_err(WinError::WindowRect)?;
     Ok(from_win_rect(r))
 }
 
-/// Queries `DWMWA_EXTENDED_FRAME_BOUNDS` (the visible window bounds excluding invisible borders).
+// Queries `DWMWA_EXTENDED_FRAME_BOUNDS` (the visible window bounds excluding invisible borders).
 fn dwm_frame_rect(hwnd: HWND) -> Option<Rect> {
     let mut r = RECT::default();
     #[expect(clippy::cast_possible_truncation)]
@@ -490,7 +490,7 @@ fn dwm_frame_rect(hwnd: HWND) -> Option<Rect> {
     res.is_ok().then(|| from_win_rect(r))
 }
 
-/// Converts a Win32 `RECT` (`left, top, right, bottom`) to `tile::Rect` (`x, y, width, height`).
+// Converts a Win32 `RECT` (`left, top, right, bottom`) to `tile::Rect` (`x, y, width, height`).
 const fn from_win_rect(r: RECT) -> Rect {
     Rect { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
 }
