@@ -1,16 +1,14 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 pub mod tile;
 pub mod win;
 
-use tracing::{Level, info};
-
-fn main() -> Result<(), win::WinError> {
-    tracing_subscriber::fmt().with_max_level(Level::DEBUG).init();
+fn main() {
     win::init_dpi();
 
-    let snapped = win::apply_foreground(tile::Action::Left, 8)?;
-    info!(snapped, "Applied Left tile action");
+    let mut history = win::RestoreHistory::new();
 
-    Ok(())
+    if let Err(err) = win::apply_foreground(tile::Action::Left, 8, &mut history) {
+        eprintln!("orthowm: failed to tile foreground window: {err}");
+    }
+
+    let _ = (win::restore_foreground, win::move_foreground_monitor);
 }
