@@ -229,7 +229,11 @@ pub fn restore_foreground(
 // Preserves the window's relative position and size proportionally to the destination
 // monitor's work area, and uses a two-pass `SetWindowPos` when crossing monitors with
 // different DPIs so Windows recalculates DWM frame borders before final placement.
-pub fn move_foreground_monitor(step: isize, fallback: Option<HWND>) -> Result<bool, WinError> {
+pub fn move_foreground_monitor(
+    step: isize,
+    logical_gap: i32,
+    fallback: Option<HWND>,
+) -> Result<bool, WinError> {
     let Some(hwnd) = resolve_target_hwnd(fallback) else {
         return Ok(false);
     };
@@ -257,7 +261,11 @@ pub fn move_foreground_monitor(step: isize, fallback: Option<HWND>) -> Result<bo
     }
 
     let current = visible_rect(hwnd)?;
-    let target = map_rect_between_screens(current, src_work, dst_work);
+    let src_gap = scale_gap(src_mon, logical_gap);
+    let dst_gap = scale_gap(dst_mon, logical_gap);
+
+    let target = tile::remap_to_screen(current, src_work, src_gap, dst_work, dst_gap)
+        .unwrap_or_else(|| map_rect_between_screens(current, src_work, dst_work));
 
     if monitor_dpi(src_mon) != monitor_dpi(dst_mon) {
         // Pass 1 (synchronous): move window onto the destination monitor so Windows sends

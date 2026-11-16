@@ -1,9 +1,9 @@
-// System tray icon, native Dark Mode popup menu, focus tracking hook, and startup registry toggle.
+// System tray icon, native Dark Mode popup menu, focus tracking hook, IPC CLI, and startup toggle.
 //
 // Creates a hidden top-level window (required to receive the `"TaskbarCreated"` broadcast
 // if `explorer.exe` restarts), registers a `Shell_NotifyIconW` tray icon, tracks the last
 // focused manageable window via `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`, and posts
-// selected menu actions back to the main thread message loop via `WM_APP_TRAY_CMD`.
+// selected menu or CLI actions back to the main thread message loop via `WM_APP_TRAY_CMD`.
 
 use std::ffi::{OsStr, c_void};
 use std::mem::{size_of, transmute};
@@ -22,7 +22,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, EVENT_SYSTEM_FOREGROUND, GetCursorPos, GetForegroundWindow, HICON,
+    DestroyWindow, EVENT_SYSTEM_FOREGROUND, FindWindowW, GetCursorPos, GetForegroundWindow, HICON,
     IDI_APPLICATION, LoadIconW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_SHOWNORMAL,
     SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
@@ -37,10 +37,13 @@ use crate::hotkey::Command;
 use crate::tile::Action;
 use crate::win;
 
+// Window class name used by the hidden tray window and IPC CLI lookup.
+const TRAY_CLASS_NAME: PCWSTR = w!("OrthoTrayWindowClass");
+
 // Custom window message sent by `Shell_NotifyIconW` on tray icon mouse events.
 const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
 
-// Custom window message posted to the main message loop when a tray menu item is clicked.
+// Custom window message posted to the main message loop when a tray or CLI command is triggered.
 pub const WM_APP_TRAY_CMD: u32 = WM_APP + 2;
 
 // Tray icon identifier.
@@ -52,7 +55,7 @@ const RUN_REG_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 // Registry value name used for Ortho startup registration.
 const RUN_VALUE_NAME: &str = "Ortho";
 
-// Menu command IDs.
+// Menu and IPC command IDs.
 const ID_LEFT: usize = 101;
 const ID_RIGHT: usize = 102;
 const ID_TOP: usize = 103;
@@ -77,10 +80,10 @@ static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 // Handle of the most recently focused manageable user window (`HWND` stored as `isize`).
 static LAST_ACTIVE_HWND: AtomicIsize = AtomicIsize::new(0);
 
-// High-level action selected from the system tray popup menu.
+// High-level action selected from the system tray popup menu or IPC CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
-    // Execute a window manager command on the last active window.
+    // Execute a window manager command on the active (or last active) window.
     Window(Command),
     // Open `%APPDATA%\ortho\config.json` in the user's default editor.
     OpenConfig,
@@ -104,12 +107,11 @@ impl Tray {
 
         let hmodule = unsafe { GetModuleHandleW(None) }.ok()?;
         let hinstance = HINSTANCE::from(hmodule);
-        let class_name = w!("OrthoTrayWindowClass");
 
         let wc = WNDCLASSW {
             lpfnWndProc: Some(tray_wnd_proc),
             hInstance: hinstance,
-            lpszClassName: class_name,
+            lpszClassName: TRAY_CLASS_NAME,
             ..Default::default()
         };
         let _ = unsafe { RegisterClassW(&raw const wc) };
@@ -120,7 +122,7 @@ impl Tray {
         let hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
-                class_name,
+                TRAY_CLASS_NAME,
                 w!("Ortho"),
                 WS_OVERLAPPED,
                 CW_USEDEFAULT,
@@ -199,6 +201,46 @@ impl Drop for Tray {
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
     }
+}
+
+// Parses a CLI subcommand (e.g. `"quit"`, `"config"`, `"left"`, `"top-right"`, `"next"`)
+// into its corresponding `WM_APP_TRAY_CMD` identifier.
+#[must_use]
+pub fn parse_cli_arg(arg: &str) -> Option<usize> {
+    let clean = arg.trim().trim_start_matches('-').to_ascii_lowercase();
+    match clean.as_str() {
+        "left" | "l" => Some(ID_LEFT),
+        "right" | "r" => Some(ID_RIGHT),
+        "top" | "up" | "u" => Some(ID_TOP),
+        "bottom" | "down" | "d" => Some(ID_BOTTOM),
+        "top-left" | "topleft" | "tl" => Some(ID_TOP_LEFT),
+        "top-right" | "topright" | "tr" => Some(ID_TOP_RIGHT),
+        "bottom-left" | "bottomleft" | "bl" => Some(ID_BOTTOM_LEFT),
+        "bottom-right" | "bottomright" | "br" => Some(ID_BOTTOM_RIGHT),
+        "almost" | "a" => Some(ID_ALMOST),
+        "maximize" | "max" | "m" => Some(ID_MAXIMIZE),
+        "center" | "c" => Some(ID_CENTER),
+        "restore" | "back" => Some(ID_RESTORE),
+        "next-monitor" | "next" | "nm" => Some(ID_NEXT_MON),
+        "prev-monitor" | "prev" | "pm" => Some(ID_PREV_MON),
+        "config" | "cfg" => Some(ID_OPEN_CONFIG),
+        "startup" | "autostart" => Some(ID_TOGGLE_STARTUP),
+        "quit" | "exit" | "stop" | "q" => Some(ID_QUIT),
+        _ => None,
+    }
+}
+
+// Sends a command ID to the already-running `orthowm` background instance via `PostMessageW`.
+//
+// Returns `true` if the running tray window was found and the message was posted.
+pub fn send_ipc_command(cmd_id: usize) -> bool {
+    let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS_NAME, None) }) else {
+        return false;
+    };
+    if hwnd.is_invalid() {
+        return false;
+    }
+    unsafe { PostMessageW(Some(hwnd), WM_APP_TRAY_CMD, WPARAM(cmd_id), LPARAM(0)) }.is_ok()
 }
 
 // Opens `config_path` in the user's default associated editor via `ShellExecuteW`.
@@ -383,7 +425,8 @@ fn remove_tray_icon(hwnd: HWND) {
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &raw const nid) };
 }
 
-// Loads embedded icon resource `#1` from the executable, falling back to `IDI_APPLICATION`.
+// Loads embedded icon resource `#1` (`MAKEINTRESOURCEW(1)`) from the executable,
+// falling back to `IDI_APPLICATION`.
 fn load_app_icon() -> HICON {
     if let Ok(hmodule) = unsafe { GetModuleHandleW(None) } {
         let hinstance = HINSTANCE::from(hmodule);
@@ -422,5 +465,36 @@ fn enable_dark_mode_menus() {
             transmute::<unsafe extern "system" fn() -> isize, FlushMenuThemesFn>(proc_136)
         };
         unsafe { flush() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_subcommands_map_to_valid_tray_events() {
+        let cases = [
+            ("left", TrayEvent::Window(Command::Tile(Action::Left))),
+            ("--right", TrayEvent::Window(Command::Tile(Action::Right))),
+            ("top-left", TrayEvent::Window(Command::Tile(Action::TopLeft))),
+            ("br", TrayEvent::Window(Command::Tile(Action::BottomRight))),
+            ("almost", TrayEvent::Window(Command::Tile(Action::Almost))),
+            ("center", TrayEvent::Window(Command::Tile(Action::Center))),
+            ("restore", TrayEvent::Window(Command::Restore)),
+            ("next-monitor", TrayEvent::Window(Command::NextMonitor)),
+            ("prev", TrayEvent::Window(Command::PrevMonitor)),
+            ("config", TrayEvent::OpenConfig),
+            ("startup", TrayEvent::ToggleStartup),
+            ("quit", TrayEvent::Quit),
+            ("--exit", TrayEvent::Quit),
+        ];
+
+        for (arg, expected) in cases {
+            let id = parse_cli_arg(arg).unwrap_or_default();
+            assert_eq!(Tray::decode_event(id), Some(expected));
+        }
+
+        assert!(parse_cli_arg("unknown").is_none());
     }
 }

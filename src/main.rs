@@ -1,5 +1,3 @@
-//! Ortho (`orthowm`) — Fast, native Rectangle-style window tiler for Windows.
-
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod config;
@@ -43,6 +41,13 @@ fn acquire_single_instance() -> Option<SingleInstance> {
 }
 
 fn main() {
+    if let Some(arg) = std::env::args().nth(1) {
+        if let Some(cmd_id) = tray::parse_cli_arg(&arg) {
+            let _ = tray::send_ipc_command(cmd_id);
+        }
+        return;
+    }
+
     let Some(_instance) = acquire_single_instance() else {
         return;
     };
@@ -101,7 +106,7 @@ fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory, fallba
     let _ = match cmd {
         Command::Tile(action) => win::apply_foreground(action, gap, history, fallback),
         Command::Restore => win::restore_foreground(history, fallback),
-        Command::PrevMonitor => win::move_foreground_monitor(-1, fallback),
-        Command::NextMonitor => win::move_foreground_monitor(1, fallback),
+        Command::PrevMonitor => win::move_foreground_monitor(-1, gap, fallback),
+        Command::NextMonitor => win::move_foreground_monitor(1, gap, fallback),
     };
 }
