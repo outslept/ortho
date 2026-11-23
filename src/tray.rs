@@ -449,7 +449,6 @@ fn load_app_icon() -> HICON {
     // SAFETY: `GetModuleHandleW(None)` retrieves the module handle of the current process.
     if let Ok(hmodule) = unsafe { GetModuleHandleW(None) } {
         let hinstance = HINSTANCE::from(hmodule);
-        #[expect(clippy::manual_dangling_ptr)]
         let resource_id = PCWSTR(APP_ICON_RESOURCE_ID as *const u16);
         // SAFETY: `MAKEINTRESOURCEW(1)` encodes an integer resource ID in the low 16 bits
         // as required by `LoadIconW`.
