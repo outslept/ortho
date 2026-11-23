@@ -1,7 +1,7 @@
-// Win32 global hotkey parsing, registration, and `WM_HOTKEY` command dispatch.
-//
-// All shortcuts are registered with `MOD_NOREPEAT` so holding down a key combination
-// fires a single 0ms action rather than flooding the thread message queue.
+//! Win32 global hotkey parsing, registration, and `WM_HOTKEY` command dispatch.
+//!
+//! All shortcuts are registered with `MOD_NOREPEAT` so holding down a key combination
+//! fires a single 0ms action rather than flooding the thread message queue.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
@@ -12,29 +12,32 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use crate::config::HotkeysConfig;
 use crate::tile::Action;
 
-// High-level window manager command triggered by a registered global hotkey.
+/// Maximum length in bytes of a single hotkey token (e.g. `"backspace"`).
+const MAX_TOKEN_LEN: usize = 16;
+
+/// High-level window manager command triggered by a registered global hotkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    // Snap or cycle the focused window using a tiling `Action`.
+    /// Snap or cycle the focused window using a tiling [`Action`].
     Tile(Action),
-    // Restore the focused window to its pre-tiled floating bounds.
+    /// Restore the focused window to its pre-tiled floating bounds.
     Restore,
-    // Move the focused window to the previous monitor.
+    /// Move the focused window to the previous monitor.
     PrevMonitor,
-    // Move the focused window to the next monitor.
+    /// Move the focused window to the next monitor.
     NextMonitor,
 }
 
-// Active global hotkeys registered on the current Win32 thread.
-//
-// Automatically unregisters all bound hotkeys when dropped or rebound.
+/// Active global hotkeys registered on the current Win32 thread.
+///
+/// Automatically unregisters all bound hotkeys when dropped or rebound.
 #[derive(Debug, Default)]
 pub struct HotkeyRegistry {
     bindings: Vec<(i32, Command)>,
 }
 
 impl HotkeyRegistry {
-    // Registers all valid hotkey specifications in `cfg` on the calling thread.
+    /// Registers all valid hotkey specifications in `cfg` on the calling thread.
     #[must_use]
     pub fn register(cfg: &HotkeysConfig) -> Self {
         let mut registry = Self { bindings: Vec::with_capacity(14) };
@@ -42,10 +45,9 @@ impl HotkeyRegistry {
         registry
     }
 
-    // Unregisters all currently active hotkeys and registers the bindings from `cfg`.
+    /// Unregisters all currently active hotkeys and registers the bindings from `cfg`.
     pub fn rebind(&mut self, cfg: &HotkeysConfig) {
         self.unregister_all();
-
         let table: [(&str, Command); 14] = [
             (&cfg.left, Command::Tile(Action::Left)),
             (&cfg.right, Command::Tile(Action::Right)),
@@ -62,29 +64,31 @@ impl HotkeyRegistry {
             (&cfg.prev_monitor, Command::PrevMonitor),
             (&cfg.next_monitor, Command::NextMonitor),
         ];
-
         for (idx, (spec, cmd)) in table.into_iter().enumerate() {
             let Some((mods, vk)) = parse_hotkey(spec) else {
                 continue;
             };
-            #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let id = (idx + 1) as i32;
-
+            let Ok(id) = i32::try_from(idx + 1) else {
+                continue;
+            };
+            // SAFETY: `None` associates the hotkey with the calling thread's message queue,
+            // and `id` is a positive thread-unique hotkey identifier.
             if unsafe { RegisterHotKey(None, id, mods | MOD_NOREPEAT, vk) }.is_ok() {
                 self.bindings.push((id, cmd));
             }
         }
     }
 
-    // Resolves a `WM_HOTKEY` identifier (`wParam`) to its corresponding [`Command`].
+    /// Resolves a `WM_HOTKEY` identifier (`wParam`) to its corresponding [`Command`].
     #[must_use]
     pub fn command_for_id(&self, id: i32) -> Option<Command> {
         self.bindings.iter().find(|&&(bound_id, _)| bound_id == id).map(|&(_, cmd)| cmd)
     }
 
-    // Unregisters all active hotkeys from the OS.
+    /// Unregisters all active hotkeys from the OS.
     fn unregister_all(&mut self) {
         for &(id, _) in &self.bindings {
+            // SAFETY: `id` was previously registered on the calling thread via `RegisterHotKey`.
             let _ = unsafe { UnregisterHotKey(None, id) };
         }
         self.bindings.clear();
@@ -97,28 +101,31 @@ impl Drop for HotkeyRegistry {
     }
 }
 
-// Parses a human-readable hotkey string (e.g. `"ctrl+alt+win+left"`) into Win32
-// [`HOT_KEY_MODIFIERS`] and a virtual-key code (`vk`).
-//
-// Returns `None` if the specification is empty, lacks at least one modifier key,
-// contains unknown tokens, or specifies multiple non-modifier keys.
+/// Parses a human-readable hotkey string (e.g. `"ctrl+alt+win+left"`) into Win32
+/// [`HOT_KEY_MODIFIERS`] and a virtual-key code (`vk`).
+///
+/// Returns `None` if the specification is empty, lacks at least one modifier key,
+/// contains unknown tokens, or specifies multiple non-modifier keys.
 #[must_use]
 pub fn parse_hotkey(spec: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
     let trimmed = spec.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
         return None;
     }
-
     let mut mods = HOT_KEY_MODIFIERS(0);
     let mut vk: Option<u32> = None;
+    let mut buf = [0_u8; MAX_TOKEN_LEN];
 
     for raw_part in trimmed.split('+') {
-        let token = raw_part.trim().to_ascii_lowercase();
-        if token.is_empty() {
+        let raw_token = raw_part.trim();
+        if raw_token.is_empty() || raw_token.len() > MAX_TOKEN_LEN || !raw_token.is_ascii() {
             return None;
         }
-
-        match token.as_str() {
+        for (dst, &src) in buf.iter_mut().zip(raw_token.as_bytes()) {
+            *dst = src.to_ascii_lowercase();
+        }
+        let token = std::str::from_utf8(&buf[..raw_token.len()]).ok()?;
+        match token {
             "ctrl" | "control" => mods |= MOD_CONTROL,
             "alt" | "menu" => mods |= MOD_ALT,
             "shift" => mods |= MOD_SHIFT,
@@ -131,22 +138,19 @@ pub fn parse_hotkey(spec: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
             }
         }
     }
-
     if mods == HOT_KEY_MODIFIERS(0) {
         return None;
     }
-
     vk.map(|code| (mods, code))
 }
 
-// Maps a lowercase key token to its Win32 virtual-key code (`VK_*`).
+/// Maps a lowercase key token to its Win32 virtual-key code (`VK_*`).
 fn parse_vk(key: &str) -> Option<u32> {
     if let [byte] = key.as_bytes()
         && byte.is_ascii_alphanumeric()
     {
         return Some(u32::from(byte.to_ascii_uppercase()));
     }
-
     let code = match key {
         "left" => u32::from(VK_LEFT.0),
         "right" => u32::from(VK_RIGHT.0),
@@ -166,11 +170,10 @@ fn parse_vk(key: &str) -> Option<u32> {
         "minus" | "-" => u32::from(VK_OEM_MINUS.0),
         _ => return parse_function_key(key),
     };
-
     Some(code)
 }
 
-// Parses function keys `"f1"` through `"f24"`.
+/// Parses function keys `"f1"` through `"f24"`.
 fn parse_function_key(key: &str) -> Option<u32> {
     let digits = key.strip_prefix('f')?;
     let num: u32 = digits.parse().ok()?;
