@@ -1,10 +1,11 @@
-// Configuration loading, default generation, and lazy `mtime`-based hot-reloading.
-//
-// Configuration is stored at `%APPDATA%\ortho\config.json`. If the file does not exist
-// on startup, `ConfigManager` creates the directory and writes the default configuration.
-// On each hotkey press, `reload_if_changed` checks only the file's modification timestamp
-// (`mtime`) and re-parses the JSON only when the timestamp changes. If the user saves
-// malformed JSON, the error is ignored and the last known-good `Config` remains active.
+//! Configuration loading, default generation, and lazy `mtime`-based hot-reloading.
+//!
+//! Configuration is stored at `%APPDATA%\ortho\config.json`. If the file does not exist
+//! on startup, [`ConfigManager`] creates the directory and writes the default configuration.
+//! On each hotkey press, [`ConfigManager::reload_if_changed`] checks only the file's
+//! modification timestamp (`mtime`) and re-parses the JSON only when the timestamp changes.
+//! If the user saves malformed JSON, the error is ignored and the last known-good [`Config`]
+//! remains active.
 
 use std::env;
 use std::fs;
@@ -13,22 +14,23 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-// Minimum allowed logical gap in pixels.
+/// Minimum allowed logical gap in pixels (`0` enables edge-to-edge tiling).
 const MIN_GAP: i32 = 0;
 
-// Maximum allowed logical gap in pixels (at 96 DPI).
+/// Maximum allowed logical gap in pixels at 96 DPI, preventing hand-edited configs
+/// from consuming the entire work area and inverting window dimensions on small displays.
 const MAX_GAP: i32 = 128;
 
-// Default logical gap in pixels (at 96 DPI).
+/// Default logical gap in pixels at 96 DPI.
 const DEFAULT_GAP: i32 = 8;
 
-// Top-level user configuration persisted in `%APPDATA%\ortho\config.json`.
+/// Top-level user configuration persisted in `%APPDATA%\ortho\config.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    // Logical gap in pixels (at 96 DPI) around screen edges and between adjacent tiled windows.
+    /// Logical gap in pixels (at 96 DPI) around screen edges and between adjacent tiled windows.
     pub gap: i32,
-    // Global keyboard shortcuts for all window tiling and monitor actions.
+    /// Global keyboard shortcuts for all window tiling and monitor actions.
     pub hotkeys: HotkeysConfig,
 }
 
@@ -39,7 +41,8 @@ impl Default for Config {
 }
 
 impl Config {
-    // Clamps numeric fields to safe bounds so hand-edited configs cannot invert window dimensions.
+    /// Clamps numeric fields to safe bounds (`0..=128`) so hand-edited configs cannot
+    /// invert window dimensions.
     #[must_use]
     pub fn sanitized(mut self) -> Self {
         self.gap = self.gap.clamp(MIN_GAP, MAX_GAP);
@@ -47,7 +50,7 @@ impl Config {
     }
 }
 
-// Keybinding strings for all supported tiling, restore, and multi-monitor commands.
+/// Keybinding strings for all supported tiling, restore, and multi-monitor commands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeysConfig {
@@ -88,7 +91,7 @@ impl Default for HotkeysConfig {
     }
 }
 
-// Manages `%APPDATA%\ortho\config.json` and performs zero-allocation `mtime` checks.
+/// Manages `%APPDATA%\ortho\config.json` and performs zero-allocation `mtime` checks.
 #[derive(Debug)]
 pub struct ConfigManager {
     path: PathBuf,
@@ -97,62 +100,56 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    // Loads the configuration from `%APPDATA%\ortho\config.json`, creating the default
-    // file on disk if it does not yet exist.
+    /// Loads the configuration from `%APPDATA%\ortho\config.json`, creating the default
+    /// file on disk if it does not yet exist.
     #[must_use]
     pub fn load() -> Self {
         let path = default_config_path();
         if !path.exists() {
             write_default_config(&path);
         }
-
         let config = read_and_parse(&path).unwrap_or_default();
         let last_mtime = file_mtime(&path);
-
         Self { path, last_mtime, config }
     }
 
-    // Checks whether `config.json` has a newer `mtime` than the last check.
-    //
-    // Returns `true` if the file was modified, parsed cleanly, and produced a configuration
-    // different from the currently active one. If the file contains invalid JSON, retains
-    // the existing valid configuration and returns `false`.
+    /// Checks whether `config.json` has a newer `mtime` than the last check.
+    ///
+    /// Returns `true` if the file was modified, parsed cleanly, and produced a configuration
+    /// different from the currently active one. If the file contains invalid JSON, retains
+    /// the existing valid configuration and returns `false`.
     pub fn reload_if_changed(&mut self) -> bool {
         let current_mtime = file_mtime(&self.path);
         if current_mtime.is_none() || current_mtime == self.last_mtime {
             return false;
         }
-
         // Record the new mtime immediately so a syntax error in config.json does not
         // trigger repeated disk reads on every subsequent keypress.
         self.last_mtime = current_mtime;
-
         let Some(new_config) = read_and_parse(&self.path) else {
             return false;
         };
-
         if new_config == self.config {
             return false;
         }
-
         self.config = new_config;
         true
     }
 
-    // Returns a reference to the currently active configuration.
+    /// Returns a reference to the currently active configuration.
     #[must_use]
     pub const fn config(&self) -> &Config {
         &self.config
     }
 
-    // Returns the filesystem path to `config.json`.
+    /// Returns the filesystem path to `config.json`.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
-// Resolves `%APPDATA%\ortho\config.json`, falling back to `./config.json` if `APPDATA` is unset.
+/// Resolves `%APPDATA%\ortho\config.json`, falling back to `./config.json` if `APPDATA` is unset.
 fn default_config_path() -> PathBuf {
     env::var_os("APPDATA").map_or_else(
         || PathBuf::from("config.json"),
@@ -160,7 +157,7 @@ fn default_config_path() -> PathBuf {
     )
 }
 
-// Writes the pretty-printed default configuration to `path`, creating parent directories as needed.
+/// Writes the pretty-printed default configuration to `path`, creating parent directories as needed.
 fn write_default_config(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -170,14 +167,14 @@ fn write_default_config(path: &Path) {
     }
 }
 
-// Reads and deserializes `Config` from `path`, clamping `gap` to valid bounds.
+/// Reads and deserializes [`Config`] from `path`, clamping `gap` to valid bounds.
 fn read_and_parse(path: &Path) -> Option<Config> {
     let raw = fs::read_to_string(path).ok()?;
     let parsed: Config = serde_json::from_str(&raw).ok()?;
     Some(parsed.sanitized())
 }
 
-// Queries the last-modified timestamp (`mtime`) of `path`.
+/// Queries the last-modified timestamp (`mtime`) of `path`.
 fn file_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
