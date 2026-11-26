@@ -199,10 +199,13 @@ impl std::error::Error for WinError {}
 pub fn init_dpi() {
     // SAFETY: `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` is a valid system constant
     // and calling `SetProcessDpiAwarenessContext` at startup before window creation is sound.
-    if unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.is_err()
+    if let Err(e) =
+        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
     {
         // SAFETY: Fallback for older builds where Per-Monitor V2 context is unavailable.
-        let _ = unsafe { SetProcessDPIAware() };
+        if !unsafe { SetProcessDPIAware() }.as_bool() {
+            crate::log::line(&format!("init_dpi fallback failed after: {e}"));
+        }
     }
 }
 
@@ -426,7 +429,8 @@ pub fn move_foreground_monitor(
     Ok(true)
 }
 
-/// Enumerates all connected display monitors sorted spatially from left to right, top to bottom.
+/// Enumerates all connected display monitors sorted primarily from left to right (by `work.x`),
+/// breaking ties from top to bottom (by `work.y`).
 fn enumerate_monitors() -> Vec<(HMONITOR, Rect)> {
     let mut list: Vec<(HMONITOR, Rect)> = Vec::with_capacity(4);
     let lparam = LPARAM((&raw mut list) as isize);

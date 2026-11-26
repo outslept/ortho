@@ -82,10 +82,16 @@ impl HotkeyRegistry {
         let mut seen_len = 0;
 
         for (idx, (spec, cmd)) in table.into_iter().enumerate() {
-            let Some((mods, vk)) = parse_hotkey(spec) else {
+            let trimmed = spec.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                continue;
+            }
+            let Some((mods, vk)) = parse_hotkey(trimmed) else {
+                crate::log::line(&format!("invalid hotkey spec: {spec:?}"));
                 continue;
             };
             if seen_combos[..seen_len].contains(&(mods, vk)) {
+                crate::log::line(&format!("duplicate hotkey spec skipped: {spec:?}"));
                 continue;
             }
             seen_combos[seen_len] = (mods, vk);
@@ -96,8 +102,9 @@ impl HotkeyRegistry {
             };
             // SAFETY: `None` associates the hotkey with the calling thread's message queue,
             // and `id` is a positive thread-unique hotkey identifier.
-            if unsafe { RegisterHotKey(None, id, mods | MOD_NOREPEAT, vk) }.is_ok() {
-                self.bindings.push((id, cmd));
+            match unsafe { RegisterHotKey(None, id, mods | MOD_NOREPEAT, vk) } {
+                Ok(()) => self.bindings.push((id, cmd)),
+                Err(e) => crate::log::line(&format!("RegisterHotKey({spec:?}) failed: {e}")),
             }
         }
     }

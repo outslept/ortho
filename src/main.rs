@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod hotkey;
+pub mod log;
 pub mod tile;
 pub mod tray;
 pub mod win;
@@ -67,12 +68,24 @@ fn main() -> ExitCode {
     let mut config_mgr = ConfigManager::load();
     let mut hotkeys = HotkeyRegistry::register(&config_mgr.config().hotkeys);
     let mut history = RestoreHistory::new();
-    let _tray = Tray::new();
+    let tray = Tray::new();
+    if tray.is_none() {
+        log::line("Tray::new failed: tray icon and IPC unavailable");
+    }
 
     let mut msg = MSG::default();
-    // SAFETY: `msg` is a valid writable `MSG` on the stack, and `None` retrieves messages
-    // for any window or thread message belonging to the calling thread.
-    while unsafe { GetMessageW(&raw mut msg, None, 0, 0) }.0 > 0 {
+    loop {
+        // SAFETY: `msg` is a valid writable `MSG` on the stack, and `None` retrieves messages
+        // for any window or thread message belonging to the calling thread.
+        let ret = unsafe { GetMessageW(&raw mut msg, None, 0, 0) }.0;
+        if ret < 0 {
+            log::line("GetMessageW returned -1; terminating message loop");
+            return ExitCode::FAILURE;
+        }
+        if ret == 0 {
+            break;
+        }
+
         if msg.message == WM_HOTKEY {
             if config_mgr.reload_if_changed() {
                 hotkeys.rebind(&config_mgr.config().hotkeys);
@@ -80,7 +93,8 @@ fn main() -> ExitCode {
             if let Ok(hotkey_id) = i32::try_from(msg.wParam.0)
                 && let Some(cmd) = hotkeys.command_for_id(hotkey_id)
             {
-                dispatch_command(cmd, config_mgr.config().gap, &mut history, None);
+                let target = Tray::last_active_window();
+                dispatch_command(cmd, config_mgr.config().gap, &mut history, target);
             }
             continue;
         }
@@ -116,15 +130,19 @@ fn main() -> ExitCode {
         let _ = unsafe { DispatchMessageW(&raw const msg) };
     }
 
+    drop(tray);
     ExitCode::SUCCESS
 }
 
 /// Executes a tiling, restore, or monitor-hop command on the focused (or `fallback`) window.
 fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory, fallback: Option<HWND>) {
-    let _ = match cmd {
+    let res = match cmd {
         Command::Tile(action) => win::apply_foreground(action, gap, history, fallback),
         Command::Restore => win::restore_foreground(history, fallback),
         Command::PrevMonitor => win::move_foreground_monitor(-1, gap, history, fallback),
         Command::NextMonitor => win::move_foreground_monitor(1, gap, history, fallback),
     };
+    if let Err(e) = res {
+        log::line(&format!("command {cmd:?} failed: {e}"));
+    }
 }

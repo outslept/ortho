@@ -5,13 +5,13 @@
 //! focused manageable window via `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`, and posts
 //! selected menu or CLI actions back to the main thread message loop via [`WM_APP_TRAY_CMD`].
 
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::mem::{size_of, transmute};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
     WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::{PCSTR, PCWSTR, w};
+use windows::core::{PCSTR, PCWSTR, s, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
@@ -52,6 +52,9 @@ const TRAY_ICON_ID: u32 = 1;
 
 /// Embedded application icon resource ID (`MAKEINTRESOURCEW(1)`).
 const APP_ICON_RESOURCE_ID: usize = 1;
+
+/// Minimum Windows 10 build number (1903) supporting `SetPreferredAppMode` & `FlushMenuThemes`.
+const MIN_DARK_MENU_BUILD: u32 = 18362;
 
 /// `uxtheme.dll` ordinal 135 (`SetPreferredAppMode` on Windows 10 1903+).
 const UXTHEME_ORD_SET_PREFERRED_APP_MODE: usize = 135;
@@ -185,6 +188,9 @@ impl Tray {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
+        if hook.is_invalid() {
+            crate::log::line("SetWinEventHook failed: foreground window tracking unavailable");
+        }
 
         add_tray_icon(hwnd);
         Some(Self { hwnd, hook })
@@ -277,7 +283,13 @@ pub fn send_ipc_command(cmd_id: usize) -> bool {
         return false;
     }
     // SAFETY: `hwnd` is a valid top-level window handle belonging to the running Ortho instance.
-    unsafe { PostMessageW(Some(hwnd), WM_APP_TRAY_CMD, WPARAM(cmd_id), LPARAM(0)) }.is_ok()
+    match unsafe { PostMessageW(Some(hwnd), WM_APP_TRAY_CMD, WPARAM(cmd_id), LPARAM(0)) } {
+        Ok(()) => true,
+        Err(e) => {
+            crate::log::line(&format!("send_ipc_command PostMessageW failed: {e}"));
+            false
+        }
+    }
 }
 
 /// Opens `config_path` in the user's default associated editor via `ShellExecuteW`.
@@ -285,7 +297,7 @@ pub fn open_config_in_editor(config_path: &Path) {
     let wide_path: Vec<u16> =
         OsStr::new(config_path).encode_wide().chain(std::iter::once(0)).collect();
     // SAFETY: `wide_path` is a null-terminated UTF-16 string and lives across the `ShellExecuteW` call.
-    let _ = unsafe {
+    let res = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
@@ -295,12 +307,19 @@ pub fn open_config_in_editor(config_path: &Path) {
             SW_SHOWNORMAL,
         )
     };
+    if (res.0 as isize) <= 32 {
+        crate::log::line(&format!("ShellExecuteW failed to open config (code {})", res.0 as isize));
+    }
 }
 
-/// Returns the quoted executable path expected in `HKCU\...\CurrentVersion\Run`.
-fn expected_startup_command() -> Option<String> {
-    let exe_path = std::env::current_exe().ok()?;
-    Some(format!("\"{}\"", exe_path.to_str()?))
+/// Returns the quoted executable path expected in `HKCU\...\CurrentVersion\Run` using native
+/// UTF-16 wide characters so arbitrary Windows paths round-trip without UTF-8 conversion.
+fn expected_startup_command() -> Option<OsString> {
+    let exe = std::env::current_exe().ok()?;
+    let q = u16::from(b'"');
+    let wide: Vec<u16> =
+        std::iter::once(q).chain(exe.as_os_str().encode_wide()).chain(std::iter::once(q)).collect();
+    Some(OsString::from_wide(&wide))
 }
 
 /// Returns `true` if Ortho is currently registered under `HKCU\...\CurrentVersion\Run`
@@ -314,21 +333,24 @@ pub fn is_startup_enabled() -> bool {
     let Ok(run_key) = hkcu.open_subkey(RUN_REG_PATH) else {
         return false;
     };
-    run_key
-        .get_value::<String, _>(RUN_VALUE_NAME)
-        .is_ok_and(|val| val.trim().eq_ignore_ascii_case(&expected))
+    run_key.get_value::<OsString, _>(RUN_VALUE_NAME).is_ok_and(|val| val == expected)
 }
 
 /// Toggles the `"Ortho"` startup entry in `HKCU\...\CurrentVersion\Run` using native registry APIs.
 pub fn toggle_startup() {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok((run_key, _)) = hkcu.create_subkey(RUN_REG_PATH) else {
+        crate::log::line("toggle_startup: failed to open Run registry key");
         return;
     };
     if is_startup_enabled() {
-        let _ = run_key.delete_value(RUN_VALUE_NAME);
-    } else if let Some(quoted) = expected_startup_command() {
-        let _ = run_key.set_value(RUN_VALUE_NAME, &quoted);
+        if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
+            crate::log::line(&format!("toggle_startup: delete_value failed: {e}"));
+        }
+    } else if let Some(quoted) = expected_startup_command()
+        && let Err(e) = run_key.set_value(RUN_VALUE_NAME, &quoted)
+    {
+        crate::log::line(&format!("toggle_startup: set_value failed: {e}"));
     }
 }
 
@@ -486,7 +508,9 @@ fn add_tray_icon(hwnd: HWND) {
         *dst = src;
     }
     // SAFETY: `nid` is properly sized and initialized with a null-terminated `szTip` buffer.
-    let _ = unsafe { Shell_NotifyIconW(NIM_ADD, &raw const nid) };
+    if !unsafe { Shell_NotifyIconW(NIM_ADD, &raw const nid) }.as_bool() {
+        crate::log::line("Shell_NotifyIconW(NIM_ADD) failed");
+    }
 }
 
 /// Removes the tray icon with `Shell_NotifyIconW(NIM_DELETE)`.
@@ -519,10 +543,53 @@ fn load_app_icon() -> HICON {
     unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default()
 }
 
+/// Returns `true` if the host OS is Windows 10 build 18362 (1903) or newer.
+fn supports_dark_mode_ordinals() -> bool {
+    #[repr(C)]
+    struct OsVersionInfoW {
+        dw_os_version_info_size: u32,
+        dw_major_version: u32,
+        dw_minor_version: u32,
+        dw_build_number: u32,
+        dw_platform_id: u32,
+        sz_csd_version: [u16; 128],
+    }
+    type RtlGetVersionFn = unsafe extern "system" fn(*mut OsVersionInfoW) -> i32;
+
+    // SAFETY: `ntdll.dll` is always mapped into every Win32 process.
+    let Ok(ntdll) = (unsafe { GetModuleHandleW(w!("ntdll.dll")) }) else {
+        return false;
+    };
+    // SAFETY: `RtlGetVersion` is a standard exported function in `ntdll.dll`.
+    let Some(proc_addr) = (unsafe { GetProcAddress(ntdll, s!("RtlGetVersion")) }) else {
+        return false;
+    };
+    // SAFETY: `proc_addr` has the `RtlGetVersion` signature `extern "system" fn(*mut OsVersionInfoW) -> NTSTATUS`.
+    let rtl_get_version: RtlGetVersionFn =
+        unsafe { transmute::<unsafe extern "system" fn() -> isize, RtlGetVersionFn>(proc_addr) };
+
+    #[expect(clippy::cast_possible_truncation)]
+    let mut info = OsVersionInfoW {
+        dw_os_version_info_size: size_of::<OsVersionInfoW>() as u32,
+        dw_major_version: 0,
+        dw_minor_version: 0,
+        dw_build_number: 0,
+        dw_platform_id: 0,
+        sz_csd_version: [0; 128],
+    };
+    // SAFETY: `info` is properly sized and writable on the stack.
+    let status = unsafe { rtl_get_version(&raw mut info) };
+    status == 0 && info.dw_major_version >= 10 && info.dw_build_number >= MIN_DARK_MENU_BUILD
+}
+
 /// Opts native Win32 popup menus into Windows 10/11 Dark Mode via `uxtheme.dll` ordinals 135 & 136.
 fn enable_dark_mode_menus() {
     type SetPreferredAppModeFn = unsafe extern "system" fn(i32) -> i32;
     type FlushMenuThemesFn = unsafe extern "system" fn();
+
+    if !supports_dark_mode_ordinals() {
+        return;
+    }
 
     // SAFETY: Loads `uxtheme.dll` strictly from `%SystemRoot%\System32`.
     let Ok(uxtheme) =
@@ -550,6 +617,9 @@ fn enable_dark_mode_menus() {
         };
         unsafe { flush() };
     }
+
+    // SAFETY: Balances the reference count incremented by `LoadLibraryExW` above.
+    let _ = unsafe { FreeLibrary(uxtheme) };
 }
 
 #[cfg(test)]
