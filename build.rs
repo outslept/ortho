@@ -60,9 +60,7 @@ fn build_ortho_ico() -> Vec<u8> {
     }
 
     // 1-bit AND mask (all 0 = alpha channel controls transparency)
-    for _ in 0..and_bytes {
-        buf.push(0);
-    }
+    buf.extend_from_slice(&[0_u8; (ICON_DIM * 4) as usize]);
 
     buf
 }
