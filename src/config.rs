@@ -223,22 +223,21 @@ mod tests {
     fn reload_if_changed_recovers_after_bad_json_even_with_identical_stamp() {
         let path = env::temp_dir().join(format!("ortho_test_cfg_{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
-
         let mut mgr = ConfigManager::load_from(path.clone());
         assert_eq!(mgr.config().gap, DEFAULT_GAP);
         assert!(!mgr.reload_if_changed());
 
-        // 1. Valid edit reloads cleanly.
-        fs::write(&path, r#"{ "gap": 24 }"#).unwrap();
+        // 1. Valid edit reloads cleanly (12 bytes, distinct from the 13-byte payloads below).
+        fs::write(&path, r#"{ "gap": 7 }"#).unwrap();
         assert!(mgr.reload_if_changed());
-        assert_eq!(mgr.config().gap, 24);
+        assert_eq!(mgr.config().gap, 7);
 
         // 2. Save malformed JSON of exact length 13 (`{ "gap": xx }`) and capture its stamp.
         let bad_payload = r#"{ "gap": xx }"#;
         fs::write(&path, bad_payload).unwrap();
         let bad_mtime = fs::metadata(&path).unwrap().modified().unwrap();
         assert!(!mgr.reload_if_changed());
-        assert_eq!(mgr.config().gap, 24);
+        assert_eq!(mgr.config().gap, 7);
 
         // 3. Fix the JSON using the exact same byte length (13 bytes) and force the exact
         // same `mtime` as the broken write: because `last_stamp` was not consumed on error,
@@ -251,7 +250,6 @@ mod tests {
         }
         assert!(mgr.reload_if_changed());
         assert_eq!(mgr.config().gap, 32);
-
         let _ = fs::remove_file(&path);
     }
 }
