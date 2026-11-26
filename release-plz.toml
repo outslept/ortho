@@ -1,0 +1,37 @@
+# Docs: https://release-plz.dev/docs/config
+
+[workspace]
+git_only = true
+
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+dependencies_update = false
+
+release_always = false
+pr_branch_prefix = "release-plz-"
+
+semver_check = false
+
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+git_release_enable = true
+git_release_name = "ortho v{{ version }}"
+git_release_body = "{{ changelog }}"
+git_release_generate_notes = true
+
+repo_url = "https://github.com/outslept/ortho"
+
+[changelog]
+protect_breaking_commits = true
+sort_commits = "newest"
+tag_pattern = "v[0-9].*"
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^chore|^ci", group = "Internal" },
+    { message = ".*", group = "Other" },
+]
