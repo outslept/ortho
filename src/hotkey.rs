@@ -15,6 +15,9 @@ use crate::tile::Action;
 /// Maximum length in bytes of a single hotkey token (e.g. `"backspace"`).
 const MAX_TOKEN_LEN: usize = 16;
 
+/// Number of configurable hotkey commands.
+const COMMAND_COUNT: usize = 14;
+
 /// High-level window manager command triggered by a registered global hotkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -34,21 +37,30 @@ pub enum Command {
 #[derive(Debug, Default)]
 pub struct HotkeyRegistry {
     bindings: Vec<(i32, Command)>,
+    active_config: Option<HotkeysConfig>,
 }
 
 impl HotkeyRegistry {
     /// Registers all valid hotkey specifications in `cfg` on the calling thread.
     #[must_use]
     pub fn register(cfg: &HotkeysConfig) -> Self {
-        let mut registry = Self { bindings: Vec::with_capacity(14) };
+        let mut registry =
+            Self { bindings: Vec::with_capacity(COMMAND_COUNT), active_config: None };
         registry.rebind(cfg);
         registry
     }
 
     /// Unregisters all currently active hotkeys and registers the bindings from `cfg`.
+    ///
+    /// No-op if `cfg` is identical to the currently registered [`HotkeysConfig`].
     pub fn rebind(&mut self, cfg: &HotkeysConfig) {
+        if self.active_config.as_ref() == Some(cfg) {
+            return;
+        }
         self.unregister_all();
-        let table: [(&str, Command); 14] = [
+        self.active_config = Some(cfg.clone());
+
+        let table: [(&str, Command); COMMAND_COUNT] = [
             (&cfg.left, Command::Tile(Action::Left)),
             (&cfg.right, Command::Tile(Action::Right)),
             (&cfg.top, Command::Tile(Action::Top)),
@@ -64,10 +76,21 @@ impl HotkeyRegistry {
             (&cfg.prev_monitor, Command::PrevMonitor),
             (&cfg.next_monitor, Command::NextMonitor),
         ];
+
+        let mut seen_combos: [(HOT_KEY_MODIFIERS, u32); COMMAND_COUNT] =
+            [(HOT_KEY_MODIFIERS(0), 0); COMMAND_COUNT];
+        let mut seen_len = 0;
+
         for (idx, (spec, cmd)) in table.into_iter().enumerate() {
             let Some((mods, vk)) = parse_hotkey(spec) else {
                 continue;
             };
+            if seen_combos[..seen_len].contains(&(mods, vk)) {
+                continue;
+            }
+            seen_combos[seen_len] = (mods, vk);
+            seen_len += 1;
+
             let Ok(id) = i32::try_from(idx + 1) else {
                 continue;
             };
@@ -112,6 +135,7 @@ pub fn parse_hotkey(spec: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
         return None;
     }
+
     let mut mods = HOT_KEY_MODIFIERS(0);
     let mut vk: Option<u32> = None;
     let mut buf = [0_u8; MAX_TOKEN_LEN];
@@ -138,6 +162,7 @@ pub fn parse_hotkey(spec: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
             }
         }
     }
+
     if mods == HOT_KEY_MODIFIERS(0) {
         return None;
     }

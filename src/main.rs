@@ -8,6 +8,8 @@ pub mod tile;
 pub mod tray;
 pub mod win;
 
+use std::process::ExitCode;
+
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -46,23 +48,28 @@ fn acquire_single_instance() -> Option<SingleInstance> {
     Some(SingleInstance(handle))
 }
 
-fn main() {
+fn main() -> ExitCode {
     if let Some(arg) = std::env::args().nth(1) {
-        if let Some(cmd_id) = tray::parse_cli_arg(&arg) {
-            let _ = tray::send_ipc_command(cmd_id);
+        if let Some(cmd_id) = tray::parse_cli_arg(&arg)
+            && tray::send_ipc_command(cmd_id)
+        {
+            return ExitCode::SUCCESS;
         }
-        return;
+        return ExitCode::FAILURE;
     }
+
     let Some(_instance) = acquire_single_instance() else {
-        return;
+        return ExitCode::SUCCESS;
     };
+
     win::init_dpi();
+
     let mut config_mgr = ConfigManager::load();
     let mut hotkeys = HotkeyRegistry::register(&config_mgr.config().hotkeys);
     let mut history = RestoreHistory::new();
     let _tray = Tray::new();
-    let mut msg = MSG::default();
 
+    let mut msg = MSG::default();
     // SAFETY: `msg` is a valid writable `MSG` on the stack, and `None` retrieves messages
     // for any window or thread message belonging to the calling thread.
     while unsafe { GetMessageW(&raw mut msg, None, 0, 0) }.0 > 0 {
@@ -75,7 +82,10 @@ fn main() {
             {
                 dispatch_command(cmd, config_mgr.config().gap, &mut history, None);
             }
-        } else if msg.message == WM_APP_TRAY_CMD {
+            continue;
+        }
+
+        if msg.message == WM_APP_TRAY_CMD {
             if config_mgr.reload_if_changed() {
                 hotkeys.rebind(&config_mgr.config().hotkeys);
             }
@@ -97,12 +107,16 @@ fn main() {
                     }
                 }
             }
+            continue;
         }
+
         // SAFETY: `msg` was populated by `GetMessageW` on the current thread.
         let _ = unsafe { TranslateMessage(&raw const msg) };
         // SAFETY: Dispatches `msg` to the target window procedure on the current thread.
         let _ = unsafe { DispatchMessageW(&raw const msg) };
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Executes a tiling, restore, or monitor-hop command on the focused (or `fallback`) window.
@@ -110,7 +124,7 @@ fn dispatch_command(cmd: Command, gap: i32, history: &mut RestoreHistory, fallba
     let _ = match cmd {
         Command::Tile(action) => win::apply_foreground(action, gap, history, fallback),
         Command::Restore => win::restore_foreground(history, fallback),
-        Command::PrevMonitor => win::move_foreground_monitor(-1, gap, fallback),
-        Command::NextMonitor => win::move_foreground_monitor(1, gap, fallback),
+        Command::PrevMonitor => win::move_foreground_monitor(-1, gap, history, fallback),
+        Command::NextMonitor => win::move_foreground_monitor(1, gap, history, fallback),
     };
 }

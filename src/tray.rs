@@ -21,13 +21,14 @@ use windows::Win32::UI::Shell::{
     ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, EVENT_SYSTEM_FOREGROUND, FindWindowW, GetCursorPos, GetForegroundWindow, HICON,
-    IDI_APPLICATION, LoadIconW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_SHOWNORMAL,
-    SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
-    WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, EVENT_SYSTEM_FOREGROUND, FindWindowW, GetCursorPos,
+    GetForegroundWindow, HICON, IDI_APPLICATION, IsWindow, LoadIconW, MF_CHECKED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSGFLT_ALLOW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SW_SHOWNORMAL, SetForegroundWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{PCSTR, PCWSTR, w};
 use winreg::RegKey;
@@ -119,9 +120,11 @@ impl Tray {
     #[must_use]
     pub fn new() -> Option<Self> {
         enable_dark_mode_menus();
+
         // SAFETY: `GetModuleHandleW(None)` retrieves the base address of the current executable.
         let hmodule = unsafe { GetModuleHandleW(None) }.ok()?;
         let hinstance = HINSTANCE::from(hmodule);
+
         let wc = WNDCLASSW {
             lpfnWndProc: Some(tray_wnd_proc),
             hInstance: hinstance,
@@ -130,9 +133,11 @@ impl Tray {
         };
         // SAFETY: `wc` is a valid `WNDCLASSW` referencing static class name and `tray_wnd_proc`.
         let _ = unsafe { RegisterClassW(&raw const wc) };
+
         // SAFETY: `"TaskbarCreated"` is a valid null-terminated UTF-16 string literal.
         let taskbar_msg = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
         TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::Relaxed);
+
         // SAFETY: `TRAY_CLASS_NAME` is registered above and `hinstance` is the current module.
         let hwnd = unsafe {
             CreateWindowExW(
@@ -151,11 +156,22 @@ impl Tray {
             )
         }
         .ok()?;
+
+        // Allow medium-integrity processes (`explorer.exe` and non-elevated CLI shells) to post
+        // tray callbacks and IPC commands when Ortho itself is running elevated (UIPI).
+        for msg in [WM_TRAY_CALLBACK, WM_APP_TRAY_CMD, taskbar_msg] {
+            if msg != 0 {
+                // SAFETY: `hwnd` is a valid window owned by the current process.
+                let _ = unsafe { ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, None) };
+            }
+        }
+
         // SAFETY: `GetForegroundWindow` takes no arguments and returns the current foreground `HWND`.
         let initial_fg = unsafe { GetForegroundWindow() };
         if win::is_manageable_hwnd(initial_fg) {
             LAST_ACTIVE_HWND.store(initial_fg.0 as isize, Ordering::Relaxed);
         }
+
         // SAFETY: `WINEVENT_OUTOFCONTEXT` delivers events on the calling thread's message loop
         // to `win_event_proc` without injecting a DLL into other processes.
         let hook = unsafe {
@@ -169,6 +185,7 @@ impl Tray {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
+
         add_tray_icon(hwnd);
         Some(Self { hwnd, hook })
     }
@@ -253,7 +270,7 @@ pub fn parse_cli_arg(arg: &str) -> Option<usize> {
 #[must_use]
 pub fn send_ipc_command(cmd_id: usize) -> bool {
     // SAFETY: `TRAY_CLASS_NAME` is a valid null-terminated UTF-16 string literal.
-    let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS_NAME, None) }) else {
+    let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS_NAME, PCWSTR::null()) }) else {
         return false;
     };
     if hwnd.is_invalid() {
@@ -269,18 +286,37 @@ pub fn open_config_in_editor(config_path: &Path) {
         OsStr::new(config_path).encode_wide().chain(std::iter::once(0)).collect();
     // SAFETY: `wide_path` is a null-terminated UTF-16 string and lives across the `ShellExecuteW` call.
     let _ = unsafe {
-        ShellExecuteW(None, w!("open"), PCWSTR(wide_path.as_ptr()), None, None, SW_SHOWNORMAL)
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide_path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
     };
 }
 
-/// Returns `true` if Ortho is currently registered under `HKCU\...\CurrentVersion\Run`.
+/// Returns the quoted executable path expected in `HKCU\...\CurrentVersion\Run`.
+fn expected_startup_command() -> Option<String> {
+    let exe_path = std::env::current_exe().ok()?;
+    Some(format!("\"{}\"", exe_path.to_str()?))
+}
+
+/// Returns `true` if Ortho is currently registered under `HKCU\...\CurrentVersion\Run`
+/// pointing to the current executable path.
 #[must_use]
 pub fn is_startup_enabled() -> bool {
+    let Some(expected) = expected_startup_command() else {
+        return false;
+    };
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok(run_key) = hkcu.open_subkey(RUN_REG_PATH) else {
         return false;
     };
-    run_key.get_value::<String, _>(RUN_VALUE_NAME).is_ok_and(|val| !val.trim().is_empty())
+    run_key
+        .get_value::<String, _>(RUN_VALUE_NAME)
+        .is_ok_and(|val| val.trim().eq_ignore_ascii_case(&expected))
 }
 
 /// Toggles the `"Ortho"` startup entry in `HKCU\...\CurrentVersion\Run` using native registry APIs.
@@ -291,8 +327,7 @@ pub fn toggle_startup() {
     };
     if is_startup_enabled() {
         let _ = run_key.delete_value(RUN_VALUE_NAME);
-    } else if let Ok(exe_path) = std::env::current_exe() {
-        let quoted = format!("\"{}\"", exe_path.display());
+    } else if let Some(quoted) = expected_startup_command() {
         let _ = run_key.set_value(RUN_VALUE_NAME, &quoted);
     }
 }
@@ -327,16 +362,19 @@ unsafe extern "system" fn tray_wnd_proc(
         }
         return LRESULT(0);
     }
+
     let taskbar_created = TASKBAR_CREATED_MSG.load(Ordering::Relaxed);
     if taskbar_created != 0 && msg == taskbar_created {
         add_tray_icon(hwnd);
         return LRESULT(0);
     }
+
     if msg == WM_DESTROY {
         // SAFETY: Posts `WM_QUIT` to the current thread's message queue.
         unsafe { PostQuitMessage(0) };
         return LRESULT(0);
     }
+
     // SAFETY: Forwards unhandled window messages to the default Win32 window procedure.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
@@ -348,14 +386,16 @@ fn show_context_menu(hwnd: HWND) {
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return;
     };
+
     // SAFETY: `menu` is a valid `HMENU` and all labels are static null-terminated UTF-16 literals.
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING, ID_LEFT, w!("Left Half\tCtrl+Alt+Left"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RIGHT, w!("Right Half\tCtrl+Alt+Right"));
         let _ = AppendMenuW(menu, MF_STRING, ID_TOP, w!("Top Half\tCtrl+Alt+Up"));
         let _ = AppendMenuW(menu, MF_STRING, ID_BOTTOM, w!("Bottom Half\tCtrl+Alt+Down"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     }
+
     // SAFETY: `CreatePopupMenu` creates a submenu whose ownership is transferred to `menu` via `MF_POPUP`.
     if let Ok(quarters) = unsafe { CreatePopupMenu() } {
         unsafe {
@@ -367,33 +407,38 @@ fn show_context_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, MF_POPUP, quarters.0 as usize, w!("Quarters"));
         }
     }
+
     let startup_flags =
         if is_startup_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+
     // SAFETY: `menu` is a valid `HMENU` and all labels are static null-terminated UTF-16 literals.
     unsafe {
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ =
             AppendMenuW(menu, MF_STRING, ID_ALMOST, w!("Almost Maximize (85%)\tCtrl+Alt+Enter"));
         let _ = AppendMenuW(menu, MF_STRING, ID_MAXIMIZE, w!("Maximize\tCtrl+Alt+M"));
         let _ = AppendMenuW(menu, MF_STRING, ID_CENTER, w!("Center\tCtrl+Alt+C"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RESTORE, w!("Restore\tCtrl+Alt+Backspace"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_NEXT_MON, w!("Next Monitor\tCtrl+Alt+Win+Right"));
         let _ =
             AppendMenuW(menu, MF_STRING, ID_PREV_MON, w!("Previous Monitor\tCtrl+Alt+Win+Left"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("Open Config..."));
         let _ = AppendMenuW(menu, startup_flags, ID_TOGGLE_STARTUP, w!("Launch at Login"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit Ortho"));
     }
 
     let mut pt = POINT::default();
     // SAFETY: `pt` is a valid writable `POINT` on the stack.
     let _ = unsafe { GetCursorPos(&raw mut pt) };
+    // SAFETY: Captures whichever window had focus before the tray icon was clicked.
+    let prev_fg = unsafe { GetForegroundWindow() };
     // SAFETY: `hwnd` is our valid hidden tray window; required by Win32 so the popup menu
     // dismisses when the user clicks outside it.
     let _ = unsafe { SetForegroundWindow(hwnd) };
+
     let flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN).0;
     // SAFETY: `menu` and `hwnd` are valid handles.
     let selected = unsafe { TrackPopupMenuEx(menu, flags, pt.x, pt.y, hwnd, None) };
@@ -401,6 +446,20 @@ fn show_context_menu(hwnd: HWND) {
     let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
     // SAFETY: `DestroyMenu` frees `menu` and its attached `quarters` submenu.
     let _ = unsafe { DestroyMenu(menu) };
+
+    // Restore focus to the previously active window (or last tracked user window) so dismissing
+    // the tray menu with Escape does not leave the hidden tray window as the foreground window.
+    let restore_target = if !prev_fg.is_invalid() && prev_fg != hwnd {
+        Some(prev_fg)
+    } else {
+        Tray::last_active_window()
+    };
+    if let Some(target) = restore_target
+        && unsafe { IsWindow(Some(target)) }.as_bool()
+    {
+        // SAFETY: `target` was verified to be a live window handle.
+        let _ = unsafe { SetForegroundWindow(target) };
+    }
 
     if selected.0 > 0
         && let Ok(cmd_id) = usize::try_from(selected.0)

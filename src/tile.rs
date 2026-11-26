@@ -42,6 +42,16 @@ impl Rect {
             && self.width.abs_diff(other.width) <= TOLERANCE
             && self.height.abs_diff(other.height) <= TOLERANCE
     }
+
+    /// Returns the total Manhattan distance across `(x, y, width, height)` between two rectangles.
+    #[must_use]
+    pub const fn dist(self, other: Self) -> u32 {
+        self.x
+            .abs_diff(other.x)
+            .saturating_add(self.y.abs_diff(other.y))
+            .saturating_add(self.width.abs_diff(other.width))
+            .saturating_add(self.height.abs_diff(other.height))
+    }
 }
 
 /// Window tiling actions.
@@ -108,7 +118,10 @@ pub fn apply(action: Action, screen: Rect, current: Rect, gap: i32) -> Rect {
         Action::BottomLeft => quarter(inner, g, HSide::Left, VSide::Bottom),
         Action::BottomRight => quarter(inner, g, HSide::Right, VSide::Bottom),
         Action::Maximize => {
-            if g > 0 && current.approx_eq(inner) {
+            if g > 0
+                && current.approx_eq(inner)
+                && (!current.approx_eq(screen) || current.dist(inner) < current.dist(screen))
+            {
                 screen
             } else {
                 inner
@@ -134,10 +147,10 @@ pub fn is_snapped(screen: Rect, current: Rect, gap: i32) -> bool {
     snap_table(screen, g).iter().any(|&target| current.approx_eq(target))
 }
 
-/// If `current` is snapped to a canonical tile on `src_screen` (with `src_gap`),
-/// returns the identical canonical tile on `dst_screen` (with `dst_gap`).
+/// Remaps `current` from `src_screen` (with `src_gap`) to `dst_screen` (with `dst_gap`).
 ///
-/// Returns `None` if the window is in a free-floating position.
+/// If `current` is snapped to a canonical tile on `src_screen`, returns the exact corresponding
+/// canonical tile on `dst_screen`; otherwise scales the floating rectangle proportionally.
 #[must_use]
 pub fn remap_to_screen(
     current: Rect,
@@ -145,11 +158,53 @@ pub fn remap_to_screen(
     src_gap: i32,
     dst_screen: Rect,
     dst_gap: i32,
-) -> Option<Rect> {
+) -> Rect {
     let sg = src_gap.max(0);
     let dg = dst_gap.max(0);
-    let idx = snap_table(src_screen, sg).iter().position(|&target| current.approx_eq(target))?;
-    snap_table(dst_screen, dg).get(idx).copied()
+    let src_table = snap_table(src_screen, sg);
+    let best_match = src_table
+        .iter()
+        .enumerate()
+        .filter(|&(_, &target)| current.approx_eq(target))
+        .min_by_key(|&(_, &target)| current.dist(target));
+
+    if let Some((idx, _)) = best_match {
+        snap_table(dst_screen, dg)[idx]
+    } else {
+        map_rect_between_screens(current, src_screen, dst_screen)
+    }
+}
+
+/// Maps a floating window rectangle `rect` proportionally from `src` work area to `dst` work area.
+#[must_use]
+pub fn map_rect_between_screens(rect: Rect, src: Rect, dst: Rect) -> Rect {
+    let src_w = i64::from(src.width.max(1));
+    let src_h = i64::from(src.height.max(1));
+    let dst_w = i64::from(dst.width.max(1));
+    let dst_h = i64::from(dst.height.max(1));
+    let rel_x = i64::from(rect.x - src.x);
+    let rel_y = i64::from(rect.y - src.y);
+    let new_x = i64::from(dst.x) + (rel_x * dst_w) / src_w;
+    let new_y = i64::from(dst.y) + (rel_y * dst_h) / src_h;
+    let new_w = ((i64::from(rect.width) * dst_w) / src_w).clamp(1, dst_w);
+    let new_h = ((i64::from(rect.height) * dst_h) / src_h).clamp(1, dst_h);
+    #[expect(clippy::cast_possible_truncation)]
+    Rect {
+        x: (new_x as i32).clamp(dst.x, dst.x + dst.width - (new_w as i32)),
+        y: (new_y as i32).clamp(dst.y, dst.y + dst.height - (new_h as i32)),
+        width: new_w as i32,
+        height: new_h as i32,
+    }
+}
+
+/// Clamps `rect` so that its dimensions and coordinates fit inside `work`.
+#[must_use]
+pub fn clamp_to_work_area(rect: Rect, work: Rect) -> Rect {
+    let width = rect.width.clamp(1, work.width.max(1));
+    let height = rect.height.clamp(1, work.height.max(1));
+    let x = rect.x.clamp(work.x, work.x + (work.width - width).max(0));
+    let y = rect.y.clamp(work.y, work.y + (work.height - height).max(0));
+    Rect { x, y, width, height }
 }
 
 /// Generates all 20 canonical snap rectangles for `screen` and physical gap `g`.
@@ -327,14 +382,41 @@ mod tests {
     }
 
     #[test]
-    fn maximize_toggles_between_padded_and_zero_gap_fullscreen() {
+    fn quarters_and_almost_tile_expected_screen_regions() {
         let gap = 8;
-        let max_padded = apply(Action::Maximize, SCREEN_1080P, FLOATING, gap);
-        assert_eq!(max_padded, Rect { x: 8, y: 8, width: 1904, height: 1064 });
-        let max_full = apply(Action::Maximize, SCREEN_1080P, max_padded, gap);
-        assert_eq!(max_full, SCREEN_1080P);
-        let max_again = apply(Action::Maximize, SCREEN_1080P, max_full, gap);
-        assert_eq!(max_again, max_padded);
+        let tl = apply(Action::TopLeft, SCREEN_1080P, FLOATING, gap);
+        let tr = apply(Action::TopRight, SCREEN_1080P, FLOATING, gap);
+        let bl = apply(Action::BottomLeft, SCREEN_1080P, FLOATING, gap);
+        let br = apply(Action::BottomRight, SCREEN_1080P, FLOATING, gap);
+
+        assert_eq!(tl.x, gap);
+        assert_eq!(tl.y, gap);
+        assert_eq!(tl.x + tl.width + gap, tr.x);
+        assert_eq!(tl.y + tl.height + gap, bl.y);
+        assert_eq!(br.x, tr.x);
+        assert_eq!(br.y, bl.y);
+
+        let almost = apply(Action::Almost, SCREEN_1080P, FLOATING, gap);
+        assert_eq!(almost.width, (1920 * ALMOST_PERCENT) / 100);
+        assert_eq!(almost.height, (1080 * ALMOST_PERCENT) / 100);
+        assert_eq!(almost.x, (1920 - almost.width) / 2);
+        assert_eq!(almost.y, (1080 - almost.height) / 2);
+    }
+
+    #[test]
+    fn maximize_toggles_between_padded_and_zero_gap_fullscreen_including_gap_one() {
+        for gap in [1, 8] {
+            let expected_padded =
+                Rect { x: gap, y: gap, width: 1920 - gap * 2, height: 1080 - gap * 2 };
+            let max_padded = apply(Action::Maximize, SCREEN_1080P, FLOATING, gap);
+            assert_eq!(max_padded, expected_padded);
+
+            let max_full = apply(Action::Maximize, SCREEN_1080P, max_padded, gap);
+            assert_eq!(max_full, SCREEN_1080P);
+
+            let max_again = apply(Action::Maximize, SCREEN_1080P, max_full, gap);
+            assert_eq!(max_again, expected_padded);
+        }
     }
 
     #[test]
@@ -354,19 +436,30 @@ mod tests {
     }
 
     #[test]
-    fn remap_to_screen_preserves_exact_grid_tile_across_monitors() {
+    fn remap_to_screen_preserves_exact_grid_tile_or_scales_floating_window() {
         let src = SCREEN_1080P;
-        let dst = Rect { x: 1920, y: 0, width: 3840, height: 2160 };
+        let dst = Rect { x: -3840, y: 0, width: 3840, height: 2160 };
         let src_gap = 8;
         let dst_gap = 12;
 
-        // Window snapped to Left 2/3 on 1080p monitor
+        // Window snapped to Left 2/3 on 1080p monitor maps to exact Left 2/3 on 4K monitor
         let l1 = apply(Action::Left, src, FLOATING, src_gap);
         let l2_src = apply(Action::Left, src, l1, src_gap);
         let remapped = remap_to_screen(l2_src, src, src_gap, dst, dst_gap);
         let dst_l1 = apply(Action::Left, dst, FLOATING, dst_gap);
         let expected_dst_l2 = apply(Action::Left, dst, dst_l1, dst_gap);
-        assert_eq!(remapped, Some(expected_dst_l2));
-        assert!(remap_to_screen(FLOATING, src, src_gap, dst, dst_gap).is_none());
+        assert_eq!(remapped, expected_dst_l2);
+
+        // Floating window scales proportionally (including negative monitor coordinates)
+        let scaled = remap_to_screen(FLOATING, src, src_gap, dst, dst_gap);
+        assert_eq!(scaled, Rect { x: -3840 + 280, y: 240, width: 1800, height: 1300 });
+    }
+
+    #[test]
+    fn clamp_to_work_area_keeps_restored_window_on_screen() {
+        let work = Rect { x: 0, y: 0, width: 1920, height: 1080 };
+        let offscreen = Rect { x: 1600, y: 900, width: 800, height: 600 };
+        let clamped = clamp_to_work_area(offscreen, work);
+        assert_eq!(clamped, Rect { x: 1120, y: 480, width: 800, height: 600 });
     }
 }
