@@ -17,7 +17,7 @@
 - **pixel-perfect** - compensates for invisible win10/11 resize borders and eliminates 1px rounding seams between adjacent tiles (`2/3` + `1/3`).
 - **multi-monitor & mixed-dpi** - scales gaps per display dpi and preserves exact grid positions across monitors.
 - **smart exclusions** - leaves 1px hover margins for auto-hide taskbars and ignores borderless fullscreen games.
-- **zero overhead** - single ~300 kb native binary, stack-allocated state, lazy metadata-based config reload on keypress.
+- **zero overhead** - single ~400 kb native binary, stack-allocated state, lazy metadata-based config reload on keypress.
 
 ## hotkeys
 
